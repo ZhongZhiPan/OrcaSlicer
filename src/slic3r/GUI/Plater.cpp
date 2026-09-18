@@ -98,6 +98,7 @@
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/FilamentMenuModel.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -3587,6 +3588,9 @@ void Sidebar::remove_unused_filament_combos(const size_t current_extruder_count)
 
 void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
 {
+    wxWindowUpdateLocker lock(this);
+    for (auto* combo : p->combos_filament)
+        combo->close_popup();
     PresetBundle &preset_bundle = *wxGetApp().preset_bundle;
     const auto print_tech = preset_bundle.printers.get_edited_preset().printer_technology();
 
@@ -3807,6 +3811,10 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
 
 void Sidebar::update_presets(Preset::Type preset_type)
 {
+    wxWindowUpdateLocker lock(this);
+    if (preset_type == Preset::TYPE_FILAMENT)
+        for (auto* combo : p->combos_filament)
+            combo->close_popup();
     PresetBundle &preset_bundle = *wxGetApp().preset_bundle;
     const auto print_tech = preset_bundle.printers.get_edited_preset().printer_technology();
 
@@ -13536,6 +13544,11 @@ bool Plater::priv::can_current_plate_be_sliced() const
 // Returns a bitmask of UpdateBackgroundProcessReturnState.
 unsigned int Plater::priv::update_background_process(bool force_validation, bool postpone_error_messages, bool switch_print)
 {
+    if (!q->reconcile_filament_selections()) {
+        background_process_timer.Stop();
+        background_process.stop();
+        return UPDATE_BACKGROUND_PROCESS_INVALID;
+    }
     // bitmap of enum UpdateBackgroundProcessReturnState
     unsigned int return_state = 0;
 
@@ -14951,7 +14964,6 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
         plate_object.emplace_back(obj_idxs);
     }
 
-    bool flag = is_support_filament(idx);
     //! Because of The MSW and GTK version of wxBitmapComboBox derived from wxComboBox,
     //! but the OSX version derived from wxOwnerDrawnCombo.
     //! So, to get selected string we do
@@ -14959,27 +14971,28 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
     //! instead of
     //!     combo->GetStringSelection().ToUTF8().data());
 
-    std::string preset_name = wxGetApp().preset_bundle->get_preset_name_by_alias(preset_type,
-        Preset::remove_suffix_modified(combo->GetString(selection).ToUTF8().data()));
+    std::string preset_name = preset_type == Preset::TYPE_FILAMENT ?
+                                  combo->filament_preset_name(selection) :
+                                  wxGetApp().preset_bundle->get_preset_name_by_alias(preset_type,
+                                                                                     Preset::remove_suffix_modified(
+                                                                                         combo->GetString(selection).ToUTF8().data()));
+    if (preset_type == Preset::TYPE_FILAMENT && preset_name.empty())
+        return;
 
     if (preset_type == Preset::TYPE_FILAMENT) {
-        wxGetApp().preset_bundle->set_filament_preset(idx, preset_name);
-        wxGetApp().plater()->update_project_dirty_from_presets();
-        wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
-        sidebar->update_dynamic_filament_list();
-        sidebar->update_color_mix_panel();
-        bool flag_is_change = is_support_filament(idx);
-        if (flag != flag_is_change) {
-            sidebar->auto_calc_flushing_volumes(idx);
+        const bool was_support = is_support_filament(idx);
+        if (!sidebar->is_multifilament() && !wxGetApp().get_tab(preset_type)->select_preset(preset_name)) {
+            combo->update();
+            return;
         }
+        q->apply_filament_selection(idx, preset_name, was_support != is_support_filament(idx));
     }
     bool select_preset = !combo->selection_is_changed_according_to_physical_printers();
     // TODO: ?
     if (preset_type == Preset::TYPE_FILAMENT && sidebar->is_multifilament()) {
         // Only update the plater UI for the 2nd and other filaments.
         combo->update();
-    }
-    else if (select_preset) {
+    } else if (select_preset && preset_type != Preset::TYPE_FILAMENT) {
         if (preset_type == Preset::TYPE_PRINTER) {
             PhysicalPrinterCollection& physical_printers = wxGetApp().preset_bundle->physical_printers;
             if(combo->is_selected_physical_printer())
@@ -15004,7 +15017,8 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
     }
 
     // update plater with new config
-    q->on_config_change(wxGetApp().preset_bundle->full_config());
+    if (preset_type != Preset::TYPE_FILAMENT)
+        q->on_config_change(wxGetApp().preset_bundle->full_config());
     if (preset_type == Preset::TYPE_PRINTER) {
     /* Settings list can be changed after printer preset changing, so
      * update all settings items for all item had it.
@@ -15041,9 +15055,6 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
     // So, set the focus to the combobox explicitly
     combo->SetFocus();
 #endif
-    if (preset_type == Preset::TYPE_FILAMENT && wxGetApp().app_config->get("auto_calculate_when_filament_change") == "true") {
-        wxGetApp().plater()->sidebar().auto_calc_flushing_volumes(idx);
-    }
 
     // BBS: log modify of filament selection
     Slic3r::put_other_changes();
@@ -17489,6 +17500,87 @@ bool Plater::is_project_dirty() const { return p->is_project_dirty(); }
 bool Plater::is_presets_dirty() const { return p->is_presets_dirty(); }
 void Plater::set_plater_dirty(bool is_dirty) { p->set_plater_dirty(is_dirty); }
 void Plater::update_project_dirty_from_presets() { p->update_project_dirty_from_presets(); }
+
+void Plater::apply_filament_selection(int idx, const std::string& preset_name, bool force_flush)
+{
+    PresetBundle* bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || idx < 0 || size_t(idx) >= bundle->filament_presets.size() ||
+        bundle->filaments.find_preset(preset_name, false) == nullptr)
+        return;
+    const bool support_changed = is_support_filament(idx) !=
+                                 bundle->filaments.find_preset(preset_name, false)->config.opt_bool("filament_is_support", 0);
+    bundle->set_filament_preset(idx, preset_name);
+    if (bundle->filament_presets.size() == 1 && bundle->filaments.get_selected_preset_name() != preset_name)
+        bundle->filaments.select_preset_by_name(preset_name, true);
+    const bool auto_flush = wxGetApp().app_config && wxGetApp().app_config->get("auto_calculate_when_filament_change") == "true";
+    propagate_filament_selection_changes(force_flush || support_changed || auto_flush ? std::vector<int>{idx} : std::vector<int>{});
+}
+
+void Plater::propagate_filament_selection_changes(const std::vector<int>& flush_slots)
+{
+    PresetBundle* bundle = wxGetApp().preset_bundle;
+    update_project_dirty_from_presets();
+    if (wxGetApp().app_config != nullptr)
+        bundle->export_selections(*wxGetApp().app_config);
+    p->sidebar->update_dynamic_filament_list();
+    p->sidebar->update_color_mix_panel();
+    for (int slot : flush_slots)
+        if (slot >= 0 && size_t(slot) < bundle->filament_presets.size())
+            p->sidebar->auto_calc_flushing_volumes(slot);
+    DynamicPrintConfig cfg = bundle->full_config();
+    on_config_change(cfg);
+}
+
+bool Plater::reconcile_filament_selections()
+{
+    auto* bundle = wxGetApp().preset_bundle;
+    if (!bundle || bundle->printers.get_edited_preset().printer_technology() != ptFFF || is_loading_project())
+        return true;
+    const auto* defaults = bundle->printers.get_edited_preset().config.option<ConfigOptionStrings>("default_filament_profile");
+    const auto  plan     = plan_filament_selections(bundle->filaments, bundle->filament_presets,
+                                               defaults ? defaults->values : std::vector<std::string>{});
+    if (!plan.valid) {
+        if (!m_filament_selection_error) {
+            m_filament_selection_error = true;
+            CallAfter([this] {
+                if (m_filament_selection_error)
+                    wxMessageBox(_L("No compatible filament preset is available. Enable a compatible filament before slicing."),
+                                 _L("Warning"), wxOK | wxICON_WARNING, this);
+            });
+        }
+        return false;
+    }
+    m_filament_selection_error = false;
+    const bool editor_mismatch = plan.names.size() == 1 && bundle->filaments.get_selected_preset_name() != plan.names.front();
+    if (plan.changed_slots.empty() && !editor_mismatch)
+        return true;
+    for (size_t slot : plan.changed_slots) {
+        const auto* replacement = bundle->filaments.find_preset(plan.names[slot], false);
+        if (is_support_filament(int(slot)) != replacement->config.opt_bool("filament_is_support", 0) ||
+            (wxGetApp().app_config && wxGetApp().app_config->get("auto_calculate_when_filament_change") == "true"))
+            m_filament_fallback_slots.push_back(int(slot));
+    }
+    bundle->filament_presets = plan.names;
+    if (plan.names.size() == 1 && bundle->filaments.get_selected_preset_name() != plan.names.front())
+        bundle->filaments.select_preset_by_name(plan.names.front(), true);
+    // Consumers run once after the synchronous batch of combo rebuilds. They
+    // read current state, never replay a captured name over a newer selection.
+    if (!m_filament_reconcile_pending) {
+        m_filament_reconcile_pending = true;
+        CallAfter([this] {
+            m_filament_reconcile_pending = false;
+            auto slots                   = std::move(m_filament_fallback_slots);
+            m_filament_fallback_slots.clear();
+            if (!reconcile_filament_selections())
+                return;
+            std::sort(slots.begin(), slots.end());
+            slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
+            propagate_filament_selection_changes(slots);
+        });
+    }
+    return true;
+}
+
 int  Plater::save_project_if_dirty(const wxString& reason) { return p->save_project_if_dirty(reason); }
 void Plater::reset_project_dirty_after_save() { p->reset_project_dirty_after_save(); }
 void Plater::reset_project_dirty_initial_presets() { p->reset_project_dirty_initial_presets(); }
@@ -17718,6 +17810,9 @@ void Plater::load_project(wxString const& filename2,
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << __LINE__ << " load project done";
     m_loading_project = false;
+    // Embedded presets, colors and physical slots are now all installed.
+    if (reconcile_filament_selections())
+        p->sidebar->update_presets(Preset::TYPE_FILAMENT);
 }
 
 // BBS: save logic
@@ -21198,6 +21293,8 @@ void Plater::export_toolpaths_to_obj() const
 //BBS: add multiple plate reslice logic
 bool Plater::reslice()
 {
+    if (!reconcile_filament_selections())
+        return false;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: enter, process_completed_with_error=%2%")%__LINE__ %p->process_completed_with_error;
     // There is "invalid data" button instead "slice now"
     if (p->process_completed_with_error == p->partplate_list.get_curr_plate_index())
@@ -21440,6 +21537,8 @@ void Plater::record_slice_preset(std::string action)
 //BBS: add project slicing related logic
 int Plater::start_next_slice()
 {
+    if (!reconcile_filament_selections())
+        return -1;
     // Stop arrange and (or) optimize rotation tasks.
     //this->stop_jobs();
 

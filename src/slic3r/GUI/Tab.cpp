@@ -3,6 +3,7 @@
 #include "Tab.hpp"
 #include "PresetHints.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/FilamentMenuModel.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Utils.hpp"
@@ -5751,6 +5752,17 @@ void Tab::update_preset_choice()
 // If the current profile is modified, user is asked to save the changes.
 bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/, const std::string& last_selected_ph_printer_name/* =""*/, bool force_select)
 {
+    if (delete_current && m_type == Preset::TYPE_FILAMENT) {
+        const auto* defaults = m_preset_bundle->printers.get_edited_preset().config.option<ConfigOptionStrings>("default_filament_profile");
+        const auto  model    = build_filament_menu_model(*m_presets, {}, 0, {m_presets->get_selected_preset_name()});
+        const int   fallback = model.fallback_index(defaults ? defaults->values : std::vector<std::string>{});
+        if (fallback < 0) {
+            wxMessageBox(_L("This filament cannot be removed because no compatible replacement is available."), _L("Warning"),
+                         wxOK | wxICON_WARNING, this);
+            return false;
+        }
+        preset_name = model.items[fallback].stable_preset_name;
+    }
     BOOST_LOG_TRIVIAL(info) << boost::format("select preset, name %1%, delete_current %2%")
         %preset_name %delete_current;
     if (preset_name.empty()) {
@@ -5791,6 +5803,24 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
     bool canceled      = false;
     bool no_transfer = false;
     bool technology_changed = false;
+    if (printer_tab && !delete_current && !preset_name.empty()) {
+        // Probe compatibility on an isolated bundle before changing the active
+        // printer (including nozzle variants) or discarding edited settings.
+        PresetBundle proposed(*m_preset_bundle);
+        if (proposed.printers.find_preset(preset_name, false)) {
+            proposed.printers.select_preset_by_name(preset_name, true);
+            if (proposed.printers.get_edited_preset().printer_technology() == ptFFF) {
+                proposed.update_compatible(PresetSelectCompatibleType::Never);
+                const auto model = build_filament_menu_model(proposed.filaments, {}, 0);
+                if (model.first_compatible_index() < 0) {
+                    wxMessageBox(_L("This printer cannot be selected because no compatible filament is enabled."), _L("Warning"),
+                                 wxOK | wxICON_WARNING, this);
+                    update_preset_choice();
+                    return false;
+                }
+            }
+        }
+    }
     m_dependent_tabs.clear();
     if ((m_presets->type() == Preset::TYPE_FILAMENT) && !preset_name.empty())
     {

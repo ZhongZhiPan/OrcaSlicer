@@ -127,6 +127,9 @@ public:
 
     // Export selections (current print, current filaments, current printer) into config.ini
     void            export_selections(AppConfig &config);
+    // Atomic recovery using the same ordered candidates as the filament menu.
+    // False leaves all slot identities unchanged for the caller to reject the operation.
+    bool resolve_filament_selections(const std::vector<std::string>& requested);
 
     // BBS
     void            set_num_filaments(unsigned int n, std::string new_col = "");

@@ -308,6 +308,11 @@ public:
     bool is_presets_dirty() const;
     void set_plater_dirty(bool is_dirty);
     void update_project_dirty_from_presets();
+    // Canonical propagation for a programmatic filament selection change
+    // (selection fallback, 3MF restore): identical consumer sequence to a
+    // manual combo selection.
+    void apply_filament_selection(int idx, const std::string& preset_name, bool force_flush = false);
+    bool reconcile_filament_selections();
     int  save_project_if_dirty(const wxString& reason);
     void reset_project_dirty_after_save();
     void reset_project_dirty_initial_presets();
@@ -996,6 +1001,10 @@ public:
 private:
     struct priv;
     std::unique_ptr<priv> p;
+    bool                  m_filament_reconcile_pending = false;
+    bool                  m_filament_selection_error   = false;
+    std::vector<int>      m_filament_fallback_slots;
+    void                  propagate_filament_selection_changes(const std::vector<int>& slots);
 
     // Set true during PopupMenu() tracking to suppress immediate error message boxes.
     // The error messages are collected to m_tracking_popup_menu_error_message instead and these error messages

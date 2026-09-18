@@ -45,6 +45,7 @@
 #include "DesktopIntegrationDialog.hpp"
 #include "slic3r/Config/Snapshot.hpp"
 #include "slic3r/Utils/PresetUpdater.hpp"
+#include "libslic3r/FilamentMenuModel.hpp"
 #include "format.hpp"
 #include "MsgDialog.hpp"
 #include "UnsavedChangesDialog.hpp"
@@ -2581,6 +2582,22 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
     }
 
     // apply materials in app_config
+    // Validate uninstallation before changing AppConfig or reloading presets.
+    // New printer installations need their new bundle loaded first; this guard
+    // covers removal of installed filaments for the existing printer.
+    if (preferred_model.empty() && preset_bundle->printers.get_edited_preset().printer_technology() == ptFFF) {
+        PresetBundle proposed(*preset_bundle);
+        for (auto it = proposed.filaments.lbegin(); it != proposed.filaments.end(); ++it)
+            it->set_visible_from_appconfig(appconfig_new);
+        const auto* defaults = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionStrings>("default_filament_profile");
+        if (!plan_filament_selections(proposed.filaments, preset_bundle->filament_presets,
+                                      defaults ? defaults->values : std::vector<std::string>{})
+                 .valid) {
+            wxMessageBox(_L("These filaments cannot be removed because no compatible replacement is available."), _L("Warning"),
+                         wxOK | wxICON_WARNING);
+            return false;
+        }
+    }
     //BBS skip sla
     for (const std::string& section_name : {AppConfig::SECTION_FILAMENTS})
         app_config->set_section(section_name, appconfig_new.get_section(section_name));

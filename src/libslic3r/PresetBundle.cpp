@@ -1,6 +1,7 @@
 #include <cassert>
 
 #include "PresetBundle.hpp"
+#include "FilamentMenuModel.hpp"
 #include "FilamentColorLibrary.hpp"
 #include "PrintConfig.hpp"
 #include "libslic3r.h"
@@ -1865,7 +1866,7 @@ void PresetBundle::update_selections(AppConfig &config)
     // Load it even if the current printer technology is SLA.
     // The possibly excessive filament names will be later removed with this->update_multi_material_filament_presets()
     // once the FFF technology gets selected.
-    this->filament_presets = { filaments.get_selected_preset_name() };
+    this->filament_presets = {initial_filament_profile_name};
     for (unsigned int i = 1; i < 1000; ++ i) {
         char name[64];
         sprintf(name, "filament_%02u", i);
@@ -1899,18 +1900,12 @@ void PresetBundle::update_selections(AppConfig &config)
     // Always try to select a compatible print and filament preset to the current printer preset,
     // as the application may have been closed with an active "external" preset, which does not
     // exist.
+    const auto requested_filaments = filament_presets;
     this->update_compatible(PresetSelectCompatibleType::Always);
     this->update_multi_material_filament_presets();
 
-    std::string first_visible_filament_name;
-    for (auto & fp : filament_presets) {
-        if (auto it = filaments.find_preset_internal(fp); it == filaments.end() || !it->is_visible || !it->is_compatible) {
-            if (first_visible_filament_name.empty())
-                first_visible_filament_name = filaments.first_compatible().name;
-            fp = first_visible_filament_name;
-        }
-    }
-
+    filament_presets = requested_filaments;
+    resolve_filament_selections(requested_filaments);
 }
 
 // Load selections (current print, current filaments, current printer) from config.ini
@@ -1998,7 +1993,7 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
     // Load it even if the current printer technology is SLA.
     // The possibly excessive filament names will be later removed with this->update_multi_material_filament_presets()
     // once the FFF technology gets selected.
-    this->filament_presets = { filaments.get_selected_preset_name() };
+    this->filament_presets = {initial_filament_profile_name};
     for (unsigned int i = 1; i < 1000; ++ i) {
         char name[64];
         sprintf(name, "filament_%02u", i);
@@ -2032,6 +2027,7 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
     // Always try to select a compatible print and filament preset to the current printer preset,
     // as the application may have been closed with an active "external" preset, which does not
     // exist.
+    auto requested_filaments = filament_presets;
     this->update_compatible(PresetSelectCompatibleType::Always);
     this->update_multi_material_filament_presets();
 
@@ -2045,6 +2041,7 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
                 it != filaments.end() && (it->name == preferred_preset_name ) && it->is_visible && it->is_compatible) {
                 filaments.select_preset_by_name_strict(preferred_preset_name);
                 this->filament_presets.front() = filaments.get_selected_preset_name();
+                requested_filaments.front()    = filaments.get_selected_preset_name();
             }
         } else if (printer_technology == ptSLA && ! preferred_selection.sla_material.empty()) {
             std::string preferred_preset_name = get_preset_name_by_alias(Preset::Type::TYPE_SLA_MATERIAL, preferred_selection.sla_material);
@@ -2054,14 +2051,8 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
         }
     }
 
-    std::string first_visible_filament_name;
-    for (auto & fp : filament_presets) {
-        if (auto it = filaments.find_preset_internal(fp); it == filaments.end() || !it->is_visible || !it->is_compatible) {
-            if (first_visible_filament_name.empty())
-                first_visible_filament_name = filaments.first_compatible().name;
-            fp = first_visible_filament_name;
-        }
-    }
+    filament_presets = requested_filaments;
+    resolve_filament_selections(requested_filaments);
 
     // Parse the initial physical printer name.
     std::string initial_physical_printer_name = remove_ini_suffix(config.get("presets", "physical_printer"));
@@ -2071,6 +2062,22 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
         physical_printers.select_printer(initial_physical_printer_name);
 
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": finished, preferred printer_model_id %1%")%preferred_selection.printer_model_id;
+}
+
+bool PresetBundle::resolve_filament_selections(const std::vector<std::string>& requested)
+{
+    if (printers.get_edited_preset().printer_technology() != ptFFF)
+        return true;
+    const auto* defaults = printers.get_edited_preset().config.option<ConfigOptionStrings>("default_filament_profile");
+    const auto  plan     = plan_filament_selections(filaments, requested, defaults ? defaults->values : std::vector<std::string>{});
+    if (!plan.valid) {
+        BOOST_LOG_TRIVIAL(error) << "Cannot restore filament selections: no compatible replacement";
+        return false;
+    }
+    filament_presets = plan.names;
+    if (filament_presets.size() == 1 && filaments.get_selected_preset_name() != filament_presets.front())
+        filaments.select_preset_by_name(filament_presets.front(), true);
+    return true;
 }
 
 // Export selections (current print, current filaments, current printer) into config.ini
@@ -4248,22 +4255,34 @@ void PresetBundle::update_compatible(PresetSelectCompatibleType select_other_pri
         this->filaments.update_compatible(printer_preset_with_vendor_profile, &print_preset_with_vendor_profile, select_other_filament_if_incompatible,
             PreferedFilamentsProfileMatch(this->filaments.get_selected_idx() == size_t(-1) ? nullptr : &this->filaments.get_edited_preset(), prefered_filament_profiles));
         if (select_other_filament_if_incompatible != PresetSelectCompatibleType::Never) {
-            // Verify validity of the current filament presets.
-            const std::string prefered_filament_profile = prefered_filament_profiles.empty() ? std::string() : prefered_filament_profiles.front();
-            if (this->filament_presets.size() == 1) {
-                // The compatible profile should have been already selected for the preset editor. Just use it.
-            	if (select_other_filament_if_incompatible == PresetSelectCompatibleType::Always || filament_preset_was_compatible.front())
-                	this->filament_presets.front() = this->filaments.get_edited_preset().name;
-            } else {
-                for (size_t idx = 0; idx < this->filament_presets.size(); ++ idx) {
-                    std::string &filament_name = this->filament_presets[idx];
-                    Preset      *preset = this->filaments.find_preset(filament_name, false);
-                    if (preset == nullptr || (! preset->is_compatible && (select_other_filament_if_incompatible == PresetSelectCompatibleType::Always || filament_preset_was_compatible[idx])))
-                        // Pick a compatible profile. If there are prefered_filament_profiles, use them.
-                        filament_name = this->filaments.first_compatible(
-                            PreferedFilamentProfileMatch(preset,
-                                (idx < prefered_filament_profiles.size()) ? prefered_filament_profiles[idx] : prefered_filament_profile)).name;
+            // Compatibility changes use the same sorted candidates as menu
+            // recovery. Do not let the editor's implicit default decide slots.
+            const auto menu = build_filament_menu_model(this->filaments, {}, 0);
+            const int fallback = menu.fallback_index(prefered_filament_profiles);
+            auto names = this->filament_presets;
+            bool valid = true;
+            for (size_t idx = 0; idx < names.size(); ++idx) {
+                const Preset *preset = this->filaments.find_preset(names[idx], false);
+                if (!preset || !preset->is_visible ||
+                    (!preset->is_compatible && (select_other_filament_if_incompatible == PresetSelectCompatibleType::Always ||
+                                               filament_preset_was_compatible[idx]))) {
+                    if (fallback < 0) {
+                        valid = false;
+                        break;
+                    }
+                    names[idx] = menu.items[fallback].stable_preset_name;
+                } else if (names.size() == 1 && preset->is_compatible) {
+                    // An explicit selection in the single-filament editor is
+                    // authoritative when the previous slot is still usable.
+                    const Preset &edited = this->filaments.get_edited_preset();
+                    if (edited.is_visible && edited.is_compatible)
+                        names.front() = edited.name;
                 }
+            }
+            if (valid) {
+                this->filament_presets = std::move(names);
+                if (this->filament_presets.size() == 1 && this->filaments.get_selected_preset_name() != this->filament_presets.front())
+                    this->filaments.select_preset_by_name(this->filament_presets.front(), true);
             }
         }
 		break;

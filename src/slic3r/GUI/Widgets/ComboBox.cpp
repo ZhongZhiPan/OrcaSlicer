@@ -2,6 +2,7 @@
 #include "Label.hpp"
 
 #include <wx/dcgraph.h>
+#include <wx/weakref.h>
 
 BEGIN_EVENT_TABLE(ComboBox, TextInput)
 
@@ -31,15 +32,15 @@ static wxWindow *GetScrollParent(wxWindow *pWindow)
     return nullptr;
 }
 
-ComboBox::ComboBox(wxWindow *parent,
+ComboBox::ComboBox(wxWindow*       parent,
                    wxWindowID      id,
-                   const wxString &value,
-                   const wxPoint & pos,
-                   const wxSize &  size,
+                   const wxString& value,
+                   const wxPoint&  pos,
+                   const wxSize&   size,
                    int             n,
                    const wxString  choices[],
                    long            style)
-    : drop(texts, tips, icons)
+    : drop(texts, tips, icons, groups, item_styles, group_metas)
 {
     if (style & wxCB_READONLY)
         style |= wxRIGHT;
@@ -69,7 +70,9 @@ ComboBox::ComboBox(wxWindow *parent,
         e.SetId(GetId());
         GetEventHandler()->ProcessEvent(e);
     });
-    drop.Bind(EVT_DISMISS, [this](auto &) {
+    drop.Bind(EVT_DISMISS, [this](auto&) {
+        if (!drop_down)
+            return;
         drop_down = false;
         wxCommandEvent e(wxEVT_COMBOBOX_CLOSEUP);
         GetEventHandler()->ProcessEvent(e);
@@ -81,6 +84,8 @@ int ComboBox::GetSelection() const { return drop.GetSelection(); }
 
 void ComboBox::SetSelection(int n)
 {
+    if (n >= 0 && !drop.isSelectable(n))
+        return;
     if (n == drop.selection)
         return;
     drop.SetSelection(n);
@@ -88,9 +93,20 @@ void ComboBox::SetSelection(int n)
     if (drop.selection >= 0 && drop.iconSize.y > 0)
         SetIcon(icons[drop.selection].IsNull() ? create_scaled_bitmap("drop_down", nullptr, 16): icons[drop.selection]); // ORCA fix combo boxes without arrows
 }
-void ComboBox::SelectAndNotify(int n) { 
+void ComboBox::SelectAndNotify(int n)
+{
+    if (!drop.isSelectable(n))
+        return;
     SetSelection(n);
     sendComboBoxEvent();
+}
+
+void ComboBox::SetItemStyle(unsigned int n, int style)
+{
+    if (n < item_styles.size()) {
+        item_styles[n] = style;
+        drop.Invalidate();
+    }
 }
 
 void ComboBox::Rescale()
@@ -146,6 +162,16 @@ bool ComboBox::SetFont(wxFont const& font)
         return TextInput::SetFont(font);
 }
 
+void ComboBox::assert_parallel_arrays() const
+{
+    wxASSERT(texts.size() == tips.size());
+    wxASSERT(texts.size() == icons.size());
+    wxASSERT(texts.size() == groups.size());
+    wxASSERT(texts.size() == item_styles.size());
+    wxASSERT(texts.size() == datas.size());
+    wxASSERT(texts.size() == types.size());
+}
+
 int ComboBox::Append(const wxString &item, const wxBitmap &bitmap)
 {
     return Append(item, bitmap, nullptr);
@@ -155,35 +181,62 @@ int ComboBox::Append(const wxString &item,
                      const wxBitmap &bitmap,
                      void *          clientData)
 {
+    return Append(item, bitmap, wxString{}, clientData, 0);
+}
+
+int ComboBox::Append(const wxString& item, const wxBitmap& bitmap, const wxString& group, void* clientData, int item_style)
+{
+    if (!group.empty())
+        group_metas.emplace(group, DDGroupMeta{group, false});
+    return Append(item, bitmap, group, DDGroupMeta{}, clientData, item_style);
+}
+
+int ComboBox::Append(
+    const wxString& item, const wxBitmap& bitmap, const wxString& group_key, const DDGroupMeta& meta, void* clientData, int item_style)
+{
+    if (!group_key.empty())
+        group_metas.emplace(group_key, meta);
     texts.push_back(item);
     tips.push_back(wxString{});
     icons.push_back(bitmap);
+    groups.push_back(group_key);
+    item_styles.push_back(item_style);
     datas.push_back(clientData);
     types.push_back(wxClientData_None);
     drop.Invalidate();
+    assert_parallel_arrays();
     return texts.size() - 1;
 }
 
 void ComboBox::DoClear()
 {
+    close_popup();
     SetIcon("drop_down");
     texts.clear();
     tips.clear();
     icons.clear();
+    groups.clear();
+    item_styles.clear();
+    group_metas.clear();
     datas.clear();
     types.clear();
     drop.Invalidate(true);
+    assert_parallel_arrays();
 }
 
 void ComboBox::DoDeleteOneItem(unsigned int pos)
 {
+    close_popup();
     if (pos >= texts.size()) return;
     texts.erase(texts.begin() + pos);
     tips.erase(tips.begin() + pos);
     icons.erase(icons.begin() + pos);
+    groups.erase(groups.begin() + pos);
+    item_styles.erase(item_styles.begin() + pos);
     datas.erase(datas.begin() + pos);
     types.erase(types.begin() + pos);
     drop.Invalidate(true);
+    assert_parallel_arrays();
 }
 
 unsigned int ComboBox::GetCount() const { return texts.size(); }
@@ -210,7 +263,7 @@ wxString ComboBox::GetItemTooltip(unsigned int n) const
 void ComboBox::SetItemTooltip(unsigned int n, wxString const &value) {
     if (n >= texts.size()) return;
     tips[n] = value;
-    if (n == drop.GetSelection()) drop.SetToolTip(value);
+    drop.clear_tip();
 }
 
 wxBitmap ComboBox::GetItemBitmap(unsigned int n) { return icons[n]; }
@@ -232,11 +285,14 @@ int ComboBox::DoInsertItems(const wxArrayStringsAdapter &items,
         texts.insert(texts.begin() + pos, items[i]);
         tips.insert(tips.begin() + pos, wxString{});
         icons.insert(icons.begin() + pos, wxNullBitmap);
+        groups.insert(groups.begin() + pos, wxString{});
+        item_styles.insert(item_styles.begin() + pos, 0);
         datas.insert(datas.begin() + pos, clientData ? clientData[i] : NULL);
         types.insert(types.begin() + pos, type);
         ++pos;
     }
     drop.Invalidate(true);
+    assert_parallel_arrays();
     return pos - 1;
 }
 
@@ -248,15 +304,25 @@ void ComboBox::DoSetItemClientData(unsigned int n, void *data)
         datas[n] = data;
 }
 
+void ComboBox::close_popup() { drop.close_popup(); }
+
 void ComboBox::mouseDown(wxMouseEvent &event)
 {
     SetFocus();
     if (drop_down) {
         drop.Hide();
+        drop_down = false;
     } else if (drop.HasDismissLongTime()) {
         drop.autoPosition();
         drop_down = true;
         drop.Popup(&drop);
+        if (open_selected_group_on_popup) {
+            wxWeakRef<ComboBox> self(this);
+            CallAfter([self]() {
+                if (self && self->drop_down)
+                    self->drop.open_selected_group();
+            });
+        }
         wxCommandEvent e(wxEVT_COMBOBOX_DROPDOWN);
         GetEventHandler()->ProcessEvent(e);
     }
@@ -267,11 +333,14 @@ void ComboBox::mouseWheelMoved(wxMouseEvent &event)
     event.Skip();
     if (drop_down) return;
     auto delta = event.GetWheelRotation() < 0 ? 1 : -1;
-    unsigned int n = GetSelection() + delta;
-    if (n < GetCount()) {
-        SetSelection((int) n);
-        sendComboBoxEvent();
-    }
+    int  n     = GetSelection();
+    do {
+        n += delta;
+    } while (n >= 0 && n < (int) texts.size() && !drop.isSelectable(n));
+    if (n < 0 || n >= (int) texts.size() || !drop.isSelectable(n))
+        return;
+    SetSelection(n);
+    sendComboBoxEvent();
 }
 
 void ComboBox::keyDown(wxKeyEvent& event)
@@ -285,23 +354,42 @@ void ComboBox::keyDown(wxKeyEvent& event)
                 drop.autoPosition();
                 drop_down = true;
                 drop.Popup();
+                if (open_selected_group_on_popup) {
+                    wxWeakRef<ComboBox> self(this);
+                    CallAfter([self]() {
+                        if (self && self->drop_down)
+                            self->drop.open_selected_group();
+                    });
+                }
                 wxCommandEvent e(wxEVT_COMBOBOX_DROPDOWN);
                 GetEventHandler()->ProcessEvent(e);
             }
             break;
+        case WXK_ESCAPE:
+            if (drop_down)
+                close_popup();
+            else
+                event.Skip();
+            break;
         case WXK_UP:
         case WXK_DOWN:
         case WXK_LEFT:
-        case WXK_RIGHT:
-            if ((event.GetKeyCode() == WXK_UP || event.GetKeyCode() == WXK_LEFT) && GetSelection() > 0) {
-                SetSelection(GetSelection() - 1);
-            } else if ((event.GetKeyCode() == WXK_DOWN || event.GetKeyCode() == WXK_RIGHT) && GetSelection() + 1 < texts.size()) {
-                SetSelection(GetSelection() + 1);
-            } else {
+        case WXK_RIGHT: {
+            if (drop_down) {
+                // Arrows must not select folded-away members while the list is open.
                 break;
             }
+            bool up = event.GetKeyCode() == WXK_UP || event.GetKeyCode() == WXK_LEFT;
+            int  n  = GetSelection();
+            do {
+                n += up ? -1 : 1;
+            } while (n >= 0 && n < (int) texts.size() && !drop.isSelectable(n));
+            if (n < 0 || n >= (int) texts.size() || !drop.isSelectable(n))
+                break;
+            SetSelection(n);
             sendComboBoxEvent();
             break;
+        }
         case WXK_TAB:
             HandleAsNavigationKey(event);
             break;
@@ -314,7 +402,7 @@ void ComboBox::keyDown(wxKeyEvent& event)
 void ComboBox::onMove(wxMoveEvent &event)
 {
     event.Skip();
-    drop.Hide();
+    close_popup();
 }
 
 void ComboBox::OnEdit()

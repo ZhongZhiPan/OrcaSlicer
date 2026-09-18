@@ -12,12 +12,16 @@ class ComboBox : public wxWindowWithItems<TextInput, wxItemContainer>
     std::vector<wxString>         texts;
     std::vector<wxString>         tips;
     std::vector<wxBitmap>         icons;
+    std::vector<wxString>           groups;
+    std::vector<int>                item_styles;
+    std::map<wxString, DDGroupMeta> group_metas;
     std::vector<void *>           datas;
     std::vector<wxClientDataType> types;
 
     DropDown               drop;
     bool     drop_down = false;
     bool     text_off = false;
+    bool                   open_selected_group_on_popup = false;
 
 public:
     ComboBox(wxWindow *      parent,
@@ -31,12 +35,30 @@ public:
 
     DropDown & GetDropDown() { return drop; }
 
+    void SetOpenSelectedGroupOnPopup(bool on) { open_selected_group_on_popup = on; }
+
+    // Closes the popup chain (submenu first) with exactly one closeup event.
+    void close_popup();
+
     virtual bool SetFont(wxFont const & font) override;
 
 public:
     int Append(const wxString &item, const wxBitmap &bitmap = wxNullBitmap);
 
     int Append(const wxString &item, const wxBitmap &bitmap, void *clientData);
+
+    // Entries with a non-empty group fold into one top-level group row; the
+    // group string is both key and label.
+    int Append(const wxString& item, const wxBitmap& bitmap, const wxString& group, void* clientData = nullptr, int item_style = 0);
+
+    // Explicit group identity: key is internal and unique per section, meta
+    // carries the visible label and the second-level prefix-strip rule.
+    int Append(const wxString&    item,
+               const wxBitmap&    bitmap,
+               const wxString&    group_key,
+               const DDGroupMeta& meta,
+               void*              clientData = nullptr,
+               int                item_style = 0);
 
     unsigned int GetCount() const override;
 
@@ -45,6 +67,7 @@ public:
     void SetSelection(int n) override;
 
     void SelectAndNotify(int n);
+    void SetItemStyle(unsigned int n, int style);
 
     virtual void Rescale() override;
 
@@ -78,7 +101,7 @@ protected:
 
     void *DoGetItemClientData(unsigned int n) const override;
     void  DoSetItemClientData(unsigned int n, void *data) override;
-    
+
     void OnEdit() override;
 
     void sendComboBoxEvent();
@@ -86,8 +109,10 @@ protected:
 #ifdef __WIN32__
     WXLRESULT MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam) override;
 #endif
-
 private:
+    // Debug-only: the parallel arrays must stay the same length (wxASSERT
+    // compiles out in Release).
+    void assert_parallel_arrays() const;
 
     // some useful events
     void mouseDown(wxMouseEvent &event);

@@ -24,6 +24,7 @@ add_executable(${_TEST_NAME}_tests
 	test_marchingsquares.cpp
 	test_timeutils.cpp
 	test_voronoi.cpp
+	test_filament_menu.cpp
     test_optimizers.cpp
     test_png_io.cpp
 	test_sswcp_protocol.cpp
@@ -65,4 +66,14 @@ if (WIN32)
 endif()
 
 catch_discover_tests(${_TEST_NAME}_tests TEST_PREFIX "${_TEST_NAME}: " EXTRA_ARGS ${CATCH_EXTRA_ARGS})
+
+# Focused regression executable: builds/runs the menu and persistence fixtures
+# without requiring unrelated geometry test translation units.
+add_executable(filament_menu_tests test_filament_menu.cpp)
+target_link_libraries(filament_menu_tests PRIVATE ${TEST_LINK_LIBS})
+if (WIN32)
+    target_link_libraries(filament_menu_tests PRIVATE bcrypt.lib crypt32.lib)
+endif()
+set_property(TARGET filament_menu_tests PROPERTY FOLDER "tests")
+catch_discover_tests(filament_menu_tests TEST_PREFIX "filament_menu: " EXTRA_ARGS ${CATCH_EXTRA_ARGS})
 # add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests ${CATCH_EXTRA_ARGS})

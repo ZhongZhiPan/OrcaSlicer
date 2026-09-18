@@ -177,6 +177,8 @@ public:
     wxColor get_color() { return m_color; }
 
     bool switch_to_tab();
+    // Identity of a real menu entry; never resolve a filament alias a second time.
+    std::string filament_preset_name(int real_index) const;
     void ChangeExtruderColor();
     void show_add_menu();
     void show_edit_menu();
@@ -214,6 +216,7 @@ protected:
     void onMouseMove(wxMouseEvent& evt);
 
 private:
+    std::map<int, std::string> m_filament_preset_names;
     // BBS
     wxColor m_color;
     
