@@ -293,6 +293,14 @@ PlaterFilamentComboBox::PlaterFilamentComboBox(wxWindow *parent, Preset::Type pr
     m_scroll_parent = scroll_parent(this);
     if (m_scroll_parent != nullptr && m_scroll_parent != m_top_level)
         m_scroll_parent->Bind(wxEVT_MOVE, &PlaterFilamentComboBox::on_scroll_parent_move, this);
+
+#ifdef __WIN32__
+    // WHY: the popup closes itself when it loses activation, but FilamentDropDown::Dismiss() vetoes
+    // that while the pointer is over the popup tree - the same veto that must keep the root list open
+    // when the submenu takes its activation. This app-level event fires only for a real foreground
+    // change, so it can route the background case through close_popup()'s unconditional path.
+    wxTheApp->Bind(wxEVT_ACTIVATE_APP, &PlaterFilamentComboBox::on_app_activate, this);
+#endif
 }
 
 PlaterFilamentComboBox::~PlaterFilamentComboBox()
@@ -305,6 +313,10 @@ PlaterFilamentComboBox::~PlaterFilamentComboBox()
         m_popup->Unbind(wxEVT_COMBOBOX, &PlaterFilamentComboBox::on_popup_selection, this);
         m_popup->Unbind(EVT_DISMISS, &PlaterFilamentComboBox::on_popup_dismiss, this);
     }
+
+#ifdef __WIN32__
+    wxTheApp->Unbind(wxEVT_ACTIVATE_APP, &PlaterFilamentComboBox::on_app_activate, this);
+#endif
 
     close_popup(false);
 
@@ -746,6 +758,15 @@ void PlaterFilamentComboBox::on_top_level_size(wxSizeEvent &event)
     close_popup(true);
     event.Skip();
 }
+
+#ifdef __WIN32__
+void PlaterFilamentComboBox::on_app_activate(wxActivateEvent &event)
+{
+    if (!event.GetActive())
+        close_popup(true);
+    event.Skip();
+}
+#endif
 
 } // namespace GUI
 } // namespace Slic3r

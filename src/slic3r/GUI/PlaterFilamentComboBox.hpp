@@ -73,6 +73,10 @@ private:
     void on_top_level_move(wxMoveEvent &event);
     /** @brief Dismisses the popup when the top-level window is resized. */
     void on_top_level_size(wxSizeEvent &event);
+#ifdef __WIN32__
+    /** @brief Dismisses the popup when the application loses the foreground. */
+    void on_app_activate(wxActivateEvent &event);
+#endif
 
     /** @brief Maps a popup section header label back to its section. */
     Section section_from_header(const wxString &text) const;
